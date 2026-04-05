@@ -18,7 +18,7 @@ struct SwiftGenPlugin: BuildToolPlugin {
       .filter { fileManager.fileExists(atPath: $0.string) }
 
     // Validate paths list
-    guard validate(configurations: configurations, target: target) else {
+    guard validate(configurations: configurations, targetName: target.name) else {
       return []
     }
 
@@ -26,19 +26,64 @@ struct SwiftGenPlugin: BuildToolPlugin {
     fileManager.forceClean(directory: context.pluginWorkDirectory)
 
     return try configurations.map { configuration in
-      try .swiftgen(using: configuration, context: context, target: target)
+      try .swiftgen(
+        using: configuration,
+        executable: context.tool(named: "swiftgen").path,
+        projectDirectory: context.package.directory,
+        targetName: target.name,
+        moduleName: target.moduleName,
+        pluginWorkDirectory: context.pluginWorkDirectory
+      )
     }
   }
 }
 
+// MARK: - Xcode
+
+#if canImport(XcodeProjectPlugin)
+
+import XcodeProjectPlugin
+
+extension SwiftGenPlugin: XcodeBuildToolPlugin {
+  func createBuildCommands(context: XcodePluginContext, target: XcodeTarget) throws -> [Command] {
+    let fileManager = FileManager.default
+
+    let sourceFiles = target.inputFiles.map(\.path)
+    let sourceDirectories = Set(sourceFiles.map { $0.removingLastComponent() })
+
+    // Possible paths where there may be a config file (project root, target source dirs)
+    var candidates = [context.xcodeProject.directory.appending("swiftgen.yml")]
+    candidates += sourceDirectories.map { $0.appending("swiftgen.yml") }
+    let configurations = candidates.filter { fileManager.fileExists(atPath: $0.string) }
+
+    guard validate(configurations: configurations, targetName: target.displayName) else {
+      return []
+    }
+
+    fileManager.forceClean(directory: context.pluginWorkDirectory)
+
+    return try configurations.map { configuration in
+      try .swiftgen(
+        using: configuration,
+        executable: context.tool(named: "swiftgen").path,
+        projectDirectory: context.xcodeProject.directory,
+        targetName: target.displayName,
+        moduleName: target.displayName,
+        pluginWorkDirectory: context.pluginWorkDirectory
+      )
+    }
+  }
+}
+
+#endif
+
 // MARK: - Helpers
 
 private extension SwiftGenPlugin {
-  /// Validate the given list of configurations
-  func validate(configurations: [Path], target: Target) -> Bool {
+  func validate(configurations: [Path], targetName: String) -> Bool {
     guard !configurations.isEmpty else {
       Diagnostics.error("""
-      No SwiftGen configurations found for target \(target.name). If you would like to generate sources for this \
+      No SwiftGen configurations found for target \(targetName). If you would like to generate sources for this \
       target include a `swiftgen.yml` in the target's source directory, or include a shared `swiftgen.yml` at the \
       package's root.
       """)
@@ -50,10 +95,17 @@ private extension SwiftGenPlugin {
 }
 
 private extension Command {
-  static func swiftgen(using configuration: Path, context: PluginContext, target: Target) throws -> Command {
+  static func swiftgen(
+    using configuration: Path,
+    executable: Path,
+    projectDirectory: Path,
+    targetName: String,
+    moduleName: String,
+    pluginWorkDirectory: Path
+  ) throws -> Command {
     .prebuildCommand(
       displayName: "SwiftGen BuildTool Plugin",
-      executable: try context.tool(named: "swiftgen").path,
+      executable: executable,
       arguments: [
         "config",
         "run",
@@ -61,12 +113,12 @@ private extension Command {
         "--config", "\(configuration)"
       ],
       environment: [
-        "PROJECT_DIR": context.package.directory,
-        "TARGET_NAME": target.name,
-        "PRODUCT_MODULE_NAME": target.moduleName,
-        "DERIVED_SOURCES_DIR": context.pluginWorkDirectory
+        "PROJECT_DIR": projectDirectory,
+        "TARGET_NAME": targetName,
+        "PRODUCT_MODULE_NAME": moduleName,
+        "DERIVED_SOURCES_DIR": pluginWorkDirectory
       ],
-      outputFilesDirectory: context.pluginWorkDirectory
+      outputFilesDirectory: pluginWorkDirectory
     )
   }
 }
